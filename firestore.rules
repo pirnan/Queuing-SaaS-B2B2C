@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.email in [
+        "fernannagrampa@gmail.com",
+        "grasyaaurora126@gmail.com"
+      ];
+    }
+
+    // Helper to check if the user is the owner or manager of an establishment
+    function isEstablishmentOwner(establishmentId) {
+      let est = get(/databases/$(database)/documents/establishments/$(establishmentId)).data;
+      return isAuthenticated() && (
+        isAdmin() ||
+        est.ownerUid == request.auth.uid ||
+        ('adminEmails' in est && est.adminEmails != null && request.auth.token.email in est.adminEmails)
+      );
+    }
+
+    // 1. RESERVATIONS (Root / Single-Tenant Legacy)
+    match /reservations/{reservationId} {
+      // Anyone can read active queue entries
+      allow read: if true;
+
+      // Customers and Admins can create a reservation
+      allow create: if isAuthenticated();
+
+      // Only Admin can update reservations
+      allow update: if isAdmin();
+
+      // Admin can delete any reservation; Customers can delete their own
+      allow delete: if isAdmin() || (
+        isAuthenticated() && (
+          !('createdBy' in resource.data) || 
+          resource.data.createdBy == request.auth.uid
+        )
+      );
+    }
+
+    // 2. TABLES (Root / Single-Tenant Legacy)
+    match /tables/{tableId} {
+      // Anyone can see available tables
+      allow read: if true;
+
+      // Only Admin can add, update, or remove tables
+      allow create, update, delete: if isAdmin();
+    }
+
+    // 3. SETTINGS (Root / Single-Tenant Legacy Building logo & preferred side)
+    match /settings/{settingId} {
+      // Anyone can read building logo settings so the 3D canvas displays it
+      allow read: if true;
+      
+      // Only Admin can update or clear the building logo and side
+      allow write: if isAdmin();
+    }
+
+    // 4. ESTABLISHMENTS (Multi-Tenant Collections & Subcollections)
+    match /establishments/{establishmentId} {
+      // Anyone can read establishment details (to resolve store info and queue links)
+      allow read: if true;
+
+      // Any authenticated manager can register a new establishment
+      allow create: if isAuthenticated();
+
+      // Only the establishment owner or super admin can update or delete the store profile
+      allow update, delete: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.ownerUid == request.auth.uid ||
+          ('adminEmails' in resource.data && resource.data.adminEmails != null && request.auth.token.email in resource.data.adminEmails)
+        )
+      );
+
+      // 4a. Establishment Queue (Reservations subcollection)
+      match /reservations/{reservationId} {
+        // Anyone can view the establishment's queue
+        allow read: if true;
+
+        // Customers and Admins can join the queue
+        allow create: if isAuthenticated();
+
+        // Store Admins or Super Admins can update reservations (seating, status)
+        allow update: if isEstablishmentOwner(establishmentId);
+
+        // Store Admin can delete; Customers can cancel their own spot
+        allow delete: if isEstablishmentOwner(establishmentId) || (
+          isAuthenticated() && (
+            !('createdBy' in resource.data) || 
+            resource.data.createdBy == request.auth.uid
+          )
+        );
+      }
+
+      // 4b. Establishment Dining Tables (Tables subcollection)
+      match /tables/{tableId} {
+        // Anyone can see available tables
+        allow read: if true;
+
+        // Only Store Admin or Super Admin can add, update, or remove tables
+        allow create, update, delete: if isEstablishmentOwner(establishmentId);
+      }
+
+      // 4c. Establishment Settings (Building logo, wall art, queue capacity subcollection)
+      match /settings/{settingId} {
+        // Anyone can read 3D building configs and queue settings
+        allow read: if true;
+
+        // Only Store Admin or Super Admin can update store settings
+        allow write: if isEstablishmentOwner(establishmentId);
+      }
+    }
+  }
+}
